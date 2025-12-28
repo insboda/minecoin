@@ -16,5 +16,5 @@ try {
   );
 } catch (error) {
   console.error("Failed to mount application:", error);
-  rootElement.innerHTML = '<div style="color: white; padding: 20px;">애플리케이션을 로드하는 중 오류가 발생했습니다. 개발자 도구(F12)의 콘솔을 확인해주세요.</div>';
+  rootElement.innerHTML = '<div style="color: white; padding: 20px; text-align: center;"><h1>Application Error</h1><p>애플리케이션을 로드하는 중 오류가 발생했습니다.</p></div>';
 }
