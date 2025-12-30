@@ -5,11 +5,46 @@ import * as db from './services/storage';
 import { User, UserRole, UserStatus, SiteConfig, Transaction, TransactionStatus, NewsItem } from './types';
 import { 
   Users, CreditCard, FileText, Settings, ShieldCheck, CheckCircle, XCircle, 
-  ChevronRight, Download, BarChart2, DollarSign, Wallet, Megaphone, Trash2, Plus, AlertCircle, RefreshCw, Loader2, AlertTriangle, UserPlus, Crown, EyeOff, RotateCcw, Edit3, Bell, Server
+  ChevronRight, Download, BarChart2, DollarSign, Wallet, Megaphone, Trash2, Plus, AlertCircle, RefreshCw, Loader2, AlertTriangle, UserPlus, Crown, EyeOff, RotateCcw, Edit3, Bell, Server, Volume2
 } from 'lucide-react';
 
-// Short notification sound
-const ALERT_AUDIO_SRC = "data:audio/mp3;base64,//NExAAAAANIAAAAAExBTUUzLjEwMKqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq//NExAAAAANIAAAAAExBTUUzLjEwMKqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq//NExAAAAANIAAAAAExBTUUzLjEwMKqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq";
+// --- AUDIO UTILS ---
+// 브라우저 내장 Web Audio API를 사용하여 소리 재생 (외부 파일 의존성 제거)
+const playNotificationSound = (count = 1) => {
+  try {
+    const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
+    if (!AudioContext) return;
+    
+    const ctx = new AudioContext();
+
+    const playBeep = (startTime: number) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+
+        // 맑은 '딩' 소리 생성
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(880, startTime); // A5 (시작)
+        osc.frequency.exponentialRampToValueAtTime(440, startTime + 0.4); // A4 (끝)
+        
+        gain.gain.setValueAtTime(0.2, startTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, startTime + 0.4); // 페이드 아웃
+
+        osc.start(startTime);
+        osc.stop(startTime + 0.4);
+    };
+
+    const now = ctx.currentTime;
+    // 지정된 횟수만큼 반복 재생 (0.6초 간격)
+    for (let i = 0; i < count; i++) {
+        playBeep(now + (i * 0.6));
+    }
+  } catch (e) {
+    console.error("Audio playback failed:", e);
+  }
+};
 
 // --- PAGE COMPONENTS ---
 
@@ -643,6 +678,7 @@ const AdminDashboard: React.FC<{
 
   // For Real-time notifications
   const lastPendingCountRef = useRef<number>(0);
+  const isFirstLoadRef = useRef<boolean>(true); // Ref to track initial data load
   const [notification, setNotification] = useState<string | null>(null);
 
   useEffect(() => {
@@ -655,15 +691,20 @@ const AdminDashboard: React.FC<{
     const unsubTxs = db.subscribeToTransactions((data) => {
         // Notification Logic
         const pending = data.filter(t => t.status === TransactionStatus.PENDING && !t.isDeleted).length;
-        if (pending > lastPendingCountRef.current && lastPendingCountRef.current !== 0) {
-            try {
-                const audio = new Audio(ALERT_AUDIO_SRC);
-                audio.play().catch(() => {});
-                setNotification("새로운 구매 신청이 도착했습니다!");
-                setTimeout(() => setNotification(null), 5000);
-            } catch(e) {}
+        
+        // Skip notification on the very first load
+        if (isFirstLoadRef.current) {
+           isFirstLoadRef.current = false;
+           lastPendingCountRef.current = pending;
+        } else {
+           // If pending count increased, play sound
+           if (pending > lastPendingCountRef.current) {
+              playNotificationSound(5); // 5회 재생
+              setNotification("새로운 구매 신청이 도착했습니다!");
+              setTimeout(() => setNotification(null), 5000);
+           }
+           lastPendingCountRef.current = pending;
         }
-        lastPendingCountRef.current = pending;
         setTransactions(data);
     });
 
@@ -678,6 +719,11 @@ const AdminDashboard: React.FC<{
         setTimeout(() => setSaveMessage(''), 2000);
     }
   }, [saveMessage]);
+
+  const testSound = () => {
+    playNotificationSound(5); // 5회 재생
+    alert("알림 소리가 5회 재생됩니다. (Web Audio API 사용)");
+  };
 
   const handleUserStatus = async (userId: string, status: UserStatus) => {
     await db.updateUserStatus(userId, status);
@@ -798,14 +844,23 @@ const AdminDashboard: React.FC<{
 
   return (
     <div className="pt-24 pb-20 max-w-7xl mx-auto px-4">
-      <div className="flex justify-between items-center mb-8">
+      <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 gap-4">
         <h1 className={`text-3xl font-bold flex items-center ${isMaster ? 'text-yellow-400' : 'text-brand-400'}`}>
            {isMaster ? <Crown className="mr-3 text-yellow-500" /> : <ShieldCheck className="mr-3" />} 
            {isMaster ? '최고 관리자 대시보드' : '관리자 대시보드'}
         </h1>
-        <div className="text-xs text-gray-500 flex items-center bg-slate-800 px-3 py-1 rounded-full">
-            <div className="w-2 h-2 rounded-full bg-green-500 mr-2 animate-pulse"></div>
-            실시간 데이터 연동 중 (Firebase)
+        <div className="flex items-center gap-3">
+            <button 
+              onClick={testSound} 
+              className="flex items-center text-xs bg-slate-800 hover:bg-slate-700 text-gray-300 px-3 py-1.5 rounded-lg border border-slate-600 transition"
+              title="브라우저 정책상 클릭해야 소리가 재생됩니다. 미리 테스트해보세요."
+            >
+              <Volume2 size={14} className="mr-1.5" /> 알림 테스트
+            </button>
+            <div className="text-xs text-gray-500 flex items-center bg-slate-800 px-3 py-1.5 rounded-lg border border-slate-700">
+                <div className="w-2 h-2 rounded-full bg-green-500 mr-2 animate-pulse"></div>
+                실시간 연동중
+            </div>
         </div>
       </div>
       
