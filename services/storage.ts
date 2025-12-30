@@ -1,8 +1,34 @@
 
-import { SiteData, User, Transaction, SiteConfig, UserRole, UserStatus, TransactionStatus, NewsItem } from '../types';
+import { initializeApp } from 'firebase/app';
+import { 
+  getFirestore, collection, doc, setDoc, getDoc, getDocs, updateDoc, deleteDoc, 
+  onSnapshot, query, orderBy, where, serverTimestamp, writeBatch 
+} from 'firebase/firestore';
+import { User, Transaction, SiteConfig, UserRole, UserStatus, TransactionStatus, NewsItem } from '../types';
 
-const STORAGE_KEY = 'minecoin_db_v1';
+// --- Firebase Configuration ---
+const firebaseConfig = {
+  apiKey: "AIzaSyBDAU7boPmK8slanyEAT8tROO-6jOI5p5Y",
+  authDomain: "minecoin-59b63.firebaseapp.com",
+  projectId: "minecoin-59b63",
+  storageBucket: "minecoin-59b63.firebasestorage.app",
+  messagingSenderId: "671370090108",
+  appId: "1:671370090108:web:aa399314846babffd01bf9",
+  measurementId: "G-Z2R6HB9EXN"
+};
 
+// Initialize Firebase
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+
+// Collection References
+const USERS_COL = 'users';
+const TX_COL = 'transactions';
+const NEWS_COL = 'news';
+const CONFIG_COL = 'system';
+const CONFIG_DOC_ID = 'siteConfig';
+
+// --- Defaults ---
 const DEFAULT_CONFIG: SiteConfig = {
   coinPrice: 10000,
   adminBankName: '국민은행',
@@ -39,16 +65,7 @@ const DEFAULT_ADMIN: User = {
   createdAt: new Date().toISOString(),
 };
 
-const DEFAULT_NEWS: NewsItem[] = [
-  {
-    id: 'news-1',
-    title: 'MineCoin 글로벌 거래소 상장 예정 안내',
-    category: 'NOTICE',
-    content: '2024년 4분기, 글로벌 Top 10 거래소 상장이 확정되었습니다. 자세한 일정은 추후 공지됩니다.',
-    date: '2024-10-25T09:00:00.000Z'
-  },
-];
-
+// --- Helper Functions ---
 const generateUUID = () => {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) {
     try { return crypto.randomUUID(); } catch (e) {}
@@ -59,259 +76,260 @@ const generateUUID = () => {
   });
 };
 
-const saveDB = (data: SiteData) => {
+// --- Initialization ---
+export const initializeSystem = async () => {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-  } catch (e) {
-    console.error("Storage Save Error:", e);
-    alert("데이터 저장 실패: 브라우저 용량을 확인해주세요.");
-  }
-};
-
-const initDB = (): SiteData => {
-  const stored = localStorage.getItem(STORAGE_KEY);
-  let data: any = null;
-  let isDirty = false;
-
-  if (stored) {
-    try {
-      data = JSON.parse(stored);
-    } catch (e) {
-      data = null;
+    // 1. Check & Create Config
+    const configRef = doc(db, CONFIG_COL, CONFIG_DOC_ID);
+    const configSnap = await getDoc(configRef);
+    if (!configSnap.exists()) {
+      await setDoc(configRef, DEFAULT_CONFIG);
+      console.log("Default Config initialized");
     }
+
+    // 2. Check & Create Master Admin
+    // We query to see if ANY master exists, to avoid overwriting if ID changed manually
+    const q = query(collection(db, USERS_COL), where("role", "==", UserRole.MASTER));
+    const querySnapshot = await getDocs(q);
+    
+    if (querySnapshot.empty) {
+      await setDoc(doc(db, USERS_COL, DEFAULT_MASTER.id), DEFAULT_MASTER);
+      // Create a default sub-admin too
+      await setDoc(doc(db, USERS_COL, DEFAULT_ADMIN.id), DEFAULT_ADMIN);
+      console.log("Default Admins initialized");
+    }
+
+  } catch (error) {
+    console.error("Initialization Error:", error);
   }
-
-  if (!data || typeof data !== 'object') {
-    data = {
-      users: [DEFAULT_MASTER, DEFAULT_ADMIN],
-      transactions: [],
-      news: DEFAULT_NEWS,
-      config: DEFAULT_CONFIG
-    };
-    isDirty = true;
-  }
-
-  if (!Array.isArray(data.users)) { data.users = [DEFAULT_MASTER, DEFAULT_ADMIN]; isDirty = true; }
-  
-  // Migration: Ensure all users have a status
-  data.users = data.users.map((u: any) => ({
-    ...u,
-    status: u.status || UserStatus.APPROVED
-  }));
-
-  if (!Array.isArray(data.transactions)) { data.transactions = []; isDirty = true; }
-  if (!Array.isArray(data.news)) { data.news = DEFAULT_NEWS; isDirty = true; }
-
-  if (!data.users.find((u: User) => u.role === UserRole.MASTER)) {
-    data.users.unshift(DEFAULT_MASTER);
-    isDirty = true;
-  }
-
-  if (!data.config || typeof data.config !== 'object') {
-    data.config = DEFAULT_CONFIG;
-    isDirty = true;
-  }
-
-  if (isDirty) saveDB(data);
-  return data as SiteData;
 };
 
-export const getDB = (): SiteData => initDB();
+// --- Real-time Subscriptions (Listeners) ---
 
-export const resetDB = () => {
-  localStorage.removeItem(STORAGE_KEY);
-  initDB();
-  window.location.reload();
-};
-
-export const resetUserData = (): { deletedUsers: number, deletedTransactions: number } => {
-  const db = getDB();
-  
-  const initialUserCount = db.users.length;
-  
-  // 최고관리자(MASTER)를 제외한 모든 계정(일반관리자 포함)과 거래내역을 삭제합니다.
-  db.users = db.users.filter(u => u.role === UserRole.MASTER);
-  
-  const deletedUsers = initialUserCount - db.users.length;
-
-  const deletedTransactions = db.transactions.length;
-  // 모든 거래 내역 삭제
-  db.transactions = [];
-  
-  saveDB(db);
-  
-  return { deletedUsers, deletedTransactions };
-};
-
-export const registerUser = (user: Omit<User, 'id' | 'role' | 'createdAt' | 'status'>): { success: boolean; message: string } => {
-  const db = getDB();
-  if (db.users.find((u) => u.username === user.username)) {
-    return { success: false, message: '이미 존재하는 아이디입니다.' };
-  }
-  db.users.push({
-    ...user,
-    id: generateUUID(),
-    role: UserRole.USER,
-    status: UserStatus.PENDING, // New users are pending
-    createdAt: new Date().toISOString(),
+export const subscribeToUsers = (callback: (users: User[]) => void) => {
+  const q = query(collection(db, USERS_COL), orderBy("createdAt", "desc"));
+  return onSnapshot(q, (snapshot) => {
+    const users = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as User));
+    callback(users);
   });
-  saveDB(db);
-  return { success: true, message: '회원가입 신청이 완료되었습니다. 관리자 승인 후 로그인이 가능합니다.' };
 };
 
-export const registerAdmin = (user: Omit<User, 'id' | 'role' | 'createdAt' | 'status'>): { success: boolean; message: string } => {
-  const db = getDB();
-  if (db.users.find((u) => u.username === user.username)) {
-    return { success: false, message: '이미 존재하는 아이디입니다.' };
-  }
-  db.users.push({
-    ...user,
-    id: generateUUID(),
-    role: UserRole.ADMIN,
-    status: UserStatus.APPROVED, // Admins created by admin are approved
-    createdAt: new Date().toISOString(),
+export const subscribeToTransactions = (callback: (txs: Transaction[]) => void) => {
+  const q = query(collection(db, TX_COL)); // Ordering handled in client or simple query
+  return onSnapshot(q, (snapshot) => {
+    let txs = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as Transaction));
+    // Client-side sort because 'date' string sorting in Firestore requires index management
+    txs.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    callback(txs);
   });
-  saveDB(db);
-  return { success: true, message: '관리자 계정이 생성되었습니다.' };
 };
 
-export const loginUser = (username: string, password: string): { user: User | null; error?: string } => {
-  const db = getDB();
-  const user = db.users.find((u) => u.username === username && u.password === password);
-  
-  if (!user) return { user: null, error: '아이디 또는 비밀번호가 올바르지 않습니다.' };
-  
-  if (user.status === UserStatus.PENDING) {
-    return { user: null, error: '가입 승인 대기 중입니다. 관리자 승인 후 이용 가능합니다.' };
-  }
-  
-  if (user.status === UserStatus.REJECTED) {
-    return { user: null, error: '가입 신청이 거절되었습니다. 관리자에게 문의하세요.' };
-  }
-
-  return { user };
+export const subscribeToNews = (callback: (news: NewsItem[]) => void) => {
+  const q = query(collection(db, NEWS_COL));
+  return onSnapshot(q, (snapshot) => {
+    let news = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as NewsItem));
+    news.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    callback(news);
+  });
 };
 
-export const updateUserStatus = (userId: string, status: UserStatus) => {
-  const db = getDB();
-  const user = db.users.find(u => u.id === userId);
-  if (user) {
-    user.status = status;
-    saveDB(db);
-  }
+export const subscribeToConfig = (callback: (config: SiteConfig) => void) => {
+  const docRef = doc(db, CONFIG_COL, CONFIG_DOC_ID);
+  return onSnapshot(docRef, (snapshot) => {
+    if (snapshot.exists()) {
+      callback(snapshot.data() as SiteConfig);
+    } else {
+      callback(DEFAULT_CONFIG);
+    }
+  });
 };
 
-export const updateUser = (userId: string, updates: Partial<User>): User | null => {
-  const db = getDB();
-  const idx = db.users.findIndex((u) => u.id === userId);
-  if (idx === -1) return null;
-  db.users[idx] = { ...db.users[idx], ...updates };
-  saveDB(db);
-  return db.users[idx];
-};
+// --- Actions (Async) ---
 
-export const deleteUser = (userId: string): boolean => {
-  const db = getDB();
-  const originalLength = db.users.length;
-  // Protect Master
-  const userToDelete = db.users.find(u => u.id === userId);
-  if (userToDelete?.role === UserRole.MASTER) return false;
-
-  db.users = db.users.filter(u => u.id !== userId);
-  if (db.users.length < originalLength) {
-    saveDB(db);
-    return true;
-  }
-  return false;
-};
-
-export const getAllUsers = () => getDB().users;
-
-export const createTransaction = (userId: string, amount: number): Transaction | null => {
+export const registerUser = async (user: Omit<User, 'id' | 'role' | 'createdAt' | 'status'>): Promise<{ success: boolean; message: string }> => {
   try {
-    const db = getDB();
-    const price = db.config.coinPrice || 10000;
-    const newTx: Transaction = {
-      id: generateUUID(),
-      userId,
-      amount,
-      priceAtPurchase: price,
-      totalCost: amount * price,
-      date: new Date().toISOString(),
-      status: TransactionStatus.PENDING,
-      isDeleted: false
+    // Check username uniqueness
+    const q = query(collection(db, USERS_COL), where("username", "==", user.username));
+    const snap = await getDocs(q);
+    if (!snap.empty) {
+      return { success: false, message: '이미 존재하는 아이디입니다.' };
+    }
+
+    const newId = generateUUID();
+    const newUser: User = {
+      ...user,
+      id: newId,
+      role: UserRole.USER,
+      status: UserStatus.PENDING,
+      createdAt: new Date().toISOString()
     };
-    db.transactions.push(newTx);
-    saveDB(db);
-    return newTx;
+
+    await setDoc(doc(db, USERS_COL, newId), newUser);
+    return { success: true, message: '회원가입 신청이 완료되었습니다. 관리자 승인 후 로그인이 가능합니다.' };
   } catch (e) {
+    console.error(e);
+    return { success: false, message: '가입 처리 중 오류가 발생했습니다.' };
+  }
+};
+
+export const registerAdmin = async (user: Omit<User, 'id' | 'role' | 'createdAt' | 'status'>): Promise<{ success: boolean; message: string }> => {
+  try {
+    const q = query(collection(db, USERS_COL), where("username", "==", user.username));
+    const snap = await getDocs(q);
+    if (!snap.empty) {
+      return { success: false, message: '이미 존재하는 아이디입니다.' };
+    }
+
+    const newId = generateUUID();
+    const newUser: User = {
+      ...user,
+      id: newId,
+      role: UserRole.ADMIN,
+      status: UserStatus.APPROVED,
+      createdAt: new Date().toISOString()
+    };
+
+    await setDoc(doc(db, USERS_COL, newId), newUser);
+    return { success: true, message: '관리자 계정이 생성되었습니다.' };
+  } catch (e) {
+    return { success: false, message: '오류가 발생했습니다.' };
+  }
+};
+
+export const loginUser = async (username: string, password: string): Promise<{ user: User | null; error?: string }> => {
+  try {
+    // Note: In a real production app, use Firebase Auth. Here we query Firestore as requested for "custom auth".
+    const q = query(collection(db, USERS_COL), where("username", "==", username), where("password", "==", password));
+    const snap = await getDocs(q);
+
+    if (snap.empty) {
+      return { user: null, error: '아이디 또는 비밀번호가 올바르지 않습니다.' };
+    }
+
+    const user = { ...snap.docs[0].data(), id: snap.docs[0].id } as User;
+
+    if (user.status === UserStatus.PENDING) {
+      return { user: null, error: '가입 승인 대기 중입니다. 관리자 승인 후 이용 가능합니다.' };
+    }
+    
+    if (user.status === UserStatus.REJECTED) {
+      return { user: null, error: '가입 신청이 거절되었습니다. 관리자에게 문의하세요.' };
+    }
+
+    return { user };
+  } catch (e) {
+    console.error(e);
+    return { user: null, error: '로그인 처리 중 오류가 발생했습니다.' };
+  }
+};
+
+export const updateUserStatus = async (userId: string, status: UserStatus) => {
+  await updateDoc(doc(db, USERS_COL, userId), { status });
+};
+
+export const updateUser = async (userId: string, updates: Partial<User>): Promise<User | null> => {
+  try {
+    const userRef = doc(db, USERS_COL, userId);
+    await updateDoc(userRef, updates);
+    // Return updated user for session state update
+    const snap = await getDoc(userRef);
+    return { ...snap.data(), id: snap.id } as User;
+  } catch (e) {
+    console.error(e);
     return null;
   }
 };
 
-export const getUserTransactions = (userId: string) => {
-  return getDB().transactions
-    .filter((tx) => tx.userId === userId && !tx.isDeleted)
-    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-};
+export const deleteUser = async (userId: string): Promise<boolean> => {
+  try {
+    const userRef = doc(db, USERS_COL, userId);
+    const snap = await getDoc(userRef);
+    if (snap.exists() && snap.data().role === UserRole.MASTER) return false;
 
-export const getAllTransactions = () => {
-  return getDB().transactions.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-};
-
-export const updateTransactionStatus = (txId: string, status: TransactionStatus) => {
-  const db = getDB();
-  const tx = db.transactions.find((t) => t.id === txId);
-  if (tx) {
-    tx.status = status;
-    saveDB(db);
+    await deleteDoc(userRef);
+    return true;
+  } catch (e) {
+    return false;
   }
 };
 
-export const deleteTransaction = (txId: string) => {
-  const db = getDB();
-  const tx = db.transactions.find((t) => t.id === txId);
-  if (tx) {
-    tx.isDeleted = true;
-    saveDB(db);
+export const createTransaction = async (userId: string, amount: number, currentPrice: number): Promise<Transaction | null> => {
+  try {
+    const newId = generateUUID();
+    const newTx: Transaction = {
+      id: newId,
+      userId,
+      amount,
+      priceAtPurchase: currentPrice,
+      totalCost: amount * currentPrice,
+      date: new Date().toISOString(),
+      status: TransactionStatus.PENDING,
+      isDeleted: false
+    };
+    await setDoc(doc(db, TX_COL, newId), newTx);
+    return newTx;
+  } catch (e) {
+    console.error(e);
+    return null;
   }
 };
 
-export const restoreTransaction = (txId: string) => {
-  const db = getDB();
-  const tx = db.transactions.find((t) => t.id === txId);
-  if (tx) {
-    tx.isDeleted = false;
-    saveDB(db);
-  }
+export const updateTransactionStatus = async (txId: string, status: TransactionStatus) => {
+  await updateDoc(doc(db, TX_COL, txId), { status });
 };
 
-export const getUserApprovedCoinTotal = (userId: string) => {
-  return getDB().transactions
-    .filter((tx) => tx.userId === userId && tx.status === TransactionStatus.APPROVED && !tx.isDeleted)
-    .reduce((sum, tx) => sum + tx.amount, 0);
+export const deleteTransaction = async (txId: string) => {
+  await updateDoc(doc(db, TX_COL, txId), { isDeleted: true });
 };
 
-export const getNews = () => getDB().news.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-
-export const addNews = (news: Omit<NewsItem, 'id' | 'date'>) => {
-  const db = getDB();
-  const newItem = { ...news, id: generateUUID(), date: new Date().toISOString() };
-  db.news.push(newItem);
-  saveDB(db);
+export const restoreTransaction = async (txId: string) => {
+  await updateDoc(doc(db, TX_COL, txId), { isDeleted: false });
 };
 
-export const deleteNews = (id: string) => {
-  const db = getDB();
-  db.news = db.news.filter(n => n.id !== id);
-  saveDB(db);
+export const addNews = async (news: Omit<NewsItem, 'id' | 'date'>) => {
+  const newId = generateUUID();
+  const newItem = { 
+    ...news, 
+    id: newId, 
+    date: new Date().toISOString() 
+  };
+  await setDoc(doc(db, NEWS_COL, newId), newItem);
 };
 
-export const getSiteConfig = () => getDB().config;
+export const deleteNews = async (id: string) => {
+  await deleteDoc(doc(db, NEWS_COL, id));
+};
 
-export const updateSiteConfig = (updates: Partial<SiteConfig>) => {
-  const db = getDB();
-  db.config = { ...db.config, ...updates };
-  saveDB(db);
-  return db.config;
+export const updateSiteConfig = async (updates: Partial<SiteConfig>) => {
+  await updateDoc(doc(db, CONFIG_COL, CONFIG_DOC_ID), updates);
+  return { ...DEFAULT_CONFIG, ...updates }; // Optimistic return
+};
+
+export const resetUserData = async (): Promise<{ deletedUsers: number, deletedTransactions: number }> => {
+  // Batch delete is complex in client SDK for massive data, but doing simple loop for now
+  // 1. Delete Non-Master Users
+  const userQ = query(collection(db, USERS_COL), where("role", "!=", UserRole.MASTER));
+  const userSnap = await getDocs(userQ);
+  let deletedUsers = 0;
+  
+  const batch1 = writeBatch(db);
+  userSnap.forEach((d) => {
+    batch1.delete(d.ref);
+    deletedUsers++;
+  });
+  await batch1.commit();
+
+  // 2. Delete All Transactions
+  const txQ = query(collection(db, TX_COL));
+  const txSnap = await getDocs(txQ);
+  let deletedTransactions = 0;
+
+  const batch2 = writeBatch(db);
+  txSnap.forEach((d) => {
+    batch2.delete(d.ref);
+    deletedTransactions++;
+  });
+  await batch2.commit();
+
+  return { deletedUsers, deletedTransactions };
 };
