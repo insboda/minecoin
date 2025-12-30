@@ -1,4 +1,5 @@
-import { SiteData, User, Transaction, SiteConfig, UserRole, TransactionStatus, NewsItem } from '../types';
+
+import { SiteData, User, Transaction, SiteConfig, UserRole, UserStatus, TransactionStatus, NewsItem } from '../types';
 
 const STORAGE_KEY = 'minecoin_db_v1';
 
@@ -21,6 +22,7 @@ const DEFAULT_MASTER: User = {
   bankName: '-',
   accountNumber: '-',
   role: UserRole.MASTER,
+  status: UserStatus.APPROVED,
   createdAt: new Date().toISOString(),
 };
 
@@ -33,6 +35,7 @@ const DEFAULT_ADMIN: User = {
   bankName: '-',
   accountNumber: '-',
   role: UserRole.ADMIN,
+  status: UserStatus.APPROVED,
   createdAt: new Date().toISOString(),
 };
 
@@ -65,23 +68,19 @@ const saveDB = (data: SiteData) => {
   }
 };
 
-// Robust InitDB
 const initDB = (): SiteData => {
   const stored = localStorage.getItem(STORAGE_KEY);
   let data: any = null;
   let isDirty = false;
 
-  // 1. Try Parse
   if (stored) {
     try {
       data = JSON.parse(stored);
     } catch (e) {
-      console.warn("Storage corrupted, resetting.");
       data = null;
     }
   }
 
-  // 2. Initialize Structure if missing
   if (!data || typeof data !== 'object') {
     data = {
       users: [DEFAULT_MASTER, DEFAULT_ADMIN],
@@ -92,48 +91,59 @@ const initDB = (): SiteData => {
     isDirty = true;
   }
 
-  // 3. Check & Fix Arrays
   if (!Array.isArray(data.users)) { data.users = [DEFAULT_MASTER, DEFAULT_ADMIN]; isDirty = true; }
+  
+  // Migration: Ensure all users have a status
+  data.users = data.users.map((u: any) => ({
+    ...u,
+    status: u.status || UserStatus.APPROVED
+  }));
+
   if (!Array.isArray(data.transactions)) { data.transactions = []; isDirty = true; }
   if (!Array.isArray(data.news)) { data.news = DEFAULT_NEWS; isDirty = true; }
 
-  // 4. Ensure Master Exists
   if (!data.users.find((u: User) => u.role === UserRole.MASTER)) {
     data.users.unshift(DEFAULT_MASTER);
     isDirty = true;
   }
 
-  // 5. Check & Fix Config
   if (!data.config || typeof data.config !== 'object') {
     data.config = DEFAULT_CONFIG;
     isDirty = true;
-  } else {
-    const merged = { ...DEFAULT_CONFIG, ...data.config };
-    if (JSON.stringify(merged) !== JSON.stringify(data.config)) {
-      data.config = merged;
-      isDirty = true;
-    }
   }
 
-  if (isDirty) {
-    saveDB(data);
-  }
-
+  if (isDirty) saveDB(data);
   return data as SiteData;
 };
 
 export const getDB = (): SiteData => initDB();
 
-// New: Reset DB function
 export const resetDB = () => {
   localStorage.removeItem(STORAGE_KEY);
   initDB();
   window.location.reload();
 };
 
-// --- Services ---
+export const resetUserData = (): { deletedUsers: number, deletedTransactions: number } => {
+  const db = getDB();
+  
+  const initialUserCount = db.users.length;
+  
+  // 최고관리자(MASTER)를 제외한 모든 계정(일반관리자 포함)과 거래내역을 삭제합니다.
+  db.users = db.users.filter(u => u.role === UserRole.MASTER);
+  
+  const deletedUsers = initialUserCount - db.users.length;
 
-export const registerUser = (user: Omit<User, 'id' | 'role' | 'createdAt'>): { success: boolean; message: string } => {
+  const deletedTransactions = db.transactions.length;
+  // 모든 거래 내역 삭제
+  db.transactions = [];
+  
+  saveDB(db);
+  
+  return { deletedUsers, deletedTransactions };
+};
+
+export const registerUser = (user: Omit<User, 'id' | 'role' | 'createdAt' | 'status'>): { success: boolean; message: string } => {
   const db = getDB();
   if (db.users.find((u) => u.username === user.username)) {
     return { success: false, message: '이미 존재하는 아이디입니다.' };
@@ -142,14 +152,14 @@ export const registerUser = (user: Omit<User, 'id' | 'role' | 'createdAt'>): { s
     ...user,
     id: generateUUID(),
     role: UserRole.USER,
+    status: UserStatus.PENDING, // New users are pending
     createdAt: new Date().toISOString(),
   });
   saveDB(db);
-  return { success: true, message: '회원가입이 완료되었습니다.' };
+  return { success: true, message: '회원가입 신청이 완료되었습니다. 관리자 승인 후 로그인이 가능합니다.' };
 };
 
-// New: Register Admin
-export const registerAdmin = (user: Omit<User, 'id' | 'role' | 'createdAt'>): { success: boolean; message: string } => {
+export const registerAdmin = (user: Omit<User, 'id' | 'role' | 'createdAt' | 'status'>): { success: boolean; message: string } => {
   const db = getDB();
   if (db.users.find((u) => u.username === user.username)) {
     return { success: false, message: '이미 존재하는 아이디입니다.' };
@@ -158,15 +168,37 @@ export const registerAdmin = (user: Omit<User, 'id' | 'role' | 'createdAt'>): { 
     ...user,
     id: generateUUID(),
     role: UserRole.ADMIN,
+    status: UserStatus.APPROVED, // Admins created by admin are approved
     createdAt: new Date().toISOString(),
   });
   saveDB(db);
   return { success: true, message: '관리자 계정이 생성되었습니다.' };
 };
 
-export const loginUser = (username: string, password: string): User | null => {
+export const loginUser = (username: string, password: string): { user: User | null; error?: string } => {
   const db = getDB();
-  return db.users.find((u) => u.username === username && u.password === password) || null;
+  const user = db.users.find((u) => u.username === username && u.password === password);
+  
+  if (!user) return { user: null, error: '아이디 또는 비밀번호가 올바르지 않습니다.' };
+  
+  if (user.status === UserStatus.PENDING) {
+    return { user: null, error: '가입 승인 대기 중입니다. 관리자 승인 후 이용 가능합니다.' };
+  }
+  
+  if (user.status === UserStatus.REJECTED) {
+    return { user: null, error: '가입 신청이 거절되었습니다. 관리자에게 문의하세요.' };
+  }
+
+  return { user };
+};
+
+export const updateUserStatus = (userId: string, status: UserStatus) => {
+  const db = getDB();
+  const user = db.users.find(u => u.id === userId);
+  if (user) {
+    user.status = status;
+    saveDB(db);
+  }
 };
 
 export const updateUser = (userId: string, updates: Partial<User>): User | null => {
@@ -178,10 +210,19 @@ export const updateUser = (userId: string, updates: Partial<User>): User | null 
   return db.users[idx];
 };
 
-export const deleteUser = (userId: string) => {
+export const deleteUser = (userId: string): boolean => {
   const db = getDB();
+  const originalLength = db.users.length;
+  // Protect Master
+  const userToDelete = db.users.find(u => u.id === userId);
+  if (userToDelete?.role === UserRole.MASTER) return false;
+
   db.users = db.users.filter(u => u.id !== userId);
-  saveDB(db);
+  if (db.users.length < originalLength) {
+    saveDB(db);
+    return true;
+  }
+  return false;
 };
 
 export const getAllUsers = () => getDB().users;
@@ -189,10 +230,7 @@ export const getAllUsers = () => getDB().users;
 export const createTransaction = (userId: string, amount: number): Transaction | null => {
   try {
     const db = getDB();
-    if (!db.transactions) db.transactions = [];
-    if (!db.config) db.config = DEFAULT_CONFIG;
-    const price = typeof db.config.coinPrice === 'number' ? db.config.coinPrice : 10000;
-    
+    const price = db.config.coinPrice || 10000;
     const newTx: Transaction = {
       id: generateUUID(),
       userId,
@@ -203,25 +241,21 @@ export const createTransaction = (userId: string, amount: number): Transaction |
       status: TransactionStatus.PENDING,
       isDeleted: false
     };
-    
     db.transactions.push(newTx);
     saveDB(db);
     return newTx;
   } catch (e) {
-    console.error("Transaction Error:", e);
     return null;
   }
 };
 
 export const getUserTransactions = (userId: string) => {
-  // Only show non-deleted transactions to users
   return getDB().transactions
     .filter((tx) => tx.userId === userId && !tx.isDeleted)
     .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 };
 
 export const getAllTransactions = () => {
-  // Return ALL transactions (deletion filtering handled by UI based on role)
   return getDB().transactions.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 };
 
@@ -236,7 +270,6 @@ export const updateTransactionStatus = (txId: string, status: TransactionStatus)
 
 export const deleteTransaction = (txId: string) => {
   const db = getDB();
-  // Changed to Soft Delete
   const tx = db.transactions.find((t) => t.id === txId);
   if (tx) {
     tx.isDeleted = true;

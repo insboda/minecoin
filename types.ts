@@ -1,7 +1,14 @@
+
 export enum UserRole {
   USER = 'USER',
   ADMIN = 'ADMIN',
   MASTER = 'MASTER',
+}
+
+export enum UserStatus {
+  PENDING = '승인 대기',
+  APPROVED = '승인 완료',
+  REJECTED = '가입 거절',
 }
 
 export enum TransactionStatus {
@@ -19,6 +26,7 @@ export interface User {
   bankName: string;
   accountNumber: string;
   role: UserRole;
+  status: UserStatus;
   createdAt: string;
 }
 
